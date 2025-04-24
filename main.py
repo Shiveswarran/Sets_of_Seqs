@@ -1,282 +1,191 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from transformers import T5Tokenizer, T5EncoderModel
-import numpy as np
-import pandas as pd
 import os
-import logging
-from datetime import datetime
+import pandas as pd
+import numpy as np
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from typing import List,Dict, Tuple
+import ast
+from collections import defaultdict
+import matplotlib.pyplot as plt
+from config import Config
+from models.encoder import ProductEmbedder, PurchaseSequenceEncoder
+from models.classifier import WillBuyClassifier
+from models.recommender import ProductRecommender
+from utils.dataloader import PurchaseDataset, create_data_loaders
+from utils.metrics import MetricsTracker
+from utils.visualization import plot_training_history
 
-from helpers import EarlyStopping
-from dataloader import PurchaseBinaryDataset, PurchaseMultiLabelDataset
-from model import PurchaseBinaryClassifier, ProductMultiLabelPredictor
-from helpers import get_logger
-import argparse
+def load_data(data_dir, train_file, valid_file, test_file):
+    train_df = pd.read_csv(os.path.join(data_dir, train_file))
+    valid_df = pd.read_csv(os.path.join(data_dir, valid_file))
+    test_df = pd.read_csv(os.path.join(data_dir, test_file))
+    return train_df, valid_df, test_df
 
-def train_binary_classifier(
-    model, train_loader, val_loader,
-    device, lr, num_epochs, patience
+def get_product_catalog(dfs: list) -> List[str]:
+    all_products = set()
+    for df in dfs:
+        # Extract products from products_before
+        products_before = df['products_before'].apply(
+            lambda x: ast.literal_eval(x) if isinstance(x, str) else x
+        )
+        for products in products_before:
+            all_products.update(products)
+        
+        # Extract products from post_cutoff if available
+        if 'post_cutoff' in df.columns:
+            post_cutoff = df['post_cutoff'].apply(
+                lambda x: ast.literal_eval(x) if isinstance(x, str) else x
+            )
+            for products in post_cutoff:
+                all_products.update(products)
+    
+    return list(all_products)
+
+def train_model(
+    model,
+    train_loader,
+    valid_loader,
+    criterion,
+    optimizer,
+    device,
+    epochs,
+    task_type='binary'
 ):
-    """
-    Trains the PurchaseBinaryClassifier model on training data.
-    """
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    history = {'train': defaultdict(list), 'val': defaultdict(list)}
     
-    model.to(device)
-    early_stopper = EarlyStopping(patience=patience)
-    
-    for epoch in range(num_epochs):
+    for epoch in range(epochs):
+        # Training phase
         model.train()
-        train_losses = []
-        for products_batch, label_batch in train_loader:
-            products_list = list(products_batch)
-            labels = label_batch.to(device).view(-1, 1)  # shape: (batch_size, 1)
+        train_metrics = MetricsTracker(task_type)
+        
+        for batch in train_loader:
+            # Check if batch has 2 or 3 elements
+            if len(batch) == 2:
+                products, labels = batch
+                will_buy = None
+            else:
+                products, will_buy, labels = batch
+            
+            will_buy = will_buy.to(device).float().view(-1, 1)
+            
+            # Convert products to embeddings
+            # (This would be replaced with actual encoding)
+            inputs = torch.randn(len(products), Config.EMBEDDING_DIM).to(device)
             
             optimizer.zero_grad()
-            logits = model(products_list)  
-            loss = criterion(logits, labels)
+            outputs = model(inputs)
+            loss = criterion(outputs, will_buy)
             loss.backward()
             optimizer.step()
-            train_losses.append(loss.item())
-        
-        avg_train_loss = np.mean(train_losses)
-
-        # Validation
-        model.eval()
-        val_losses = []
-        with torch.no_grad():
-            for products_batch, label_batch in val_loader:
-                products_list = list(products_batch)
-                labels = label_batch.to(device).view(-1, 1)
-                logits = model(products_list)
-                loss = criterion(logits, labels)
-                val_losses.append(loss.item())
-        avg_val_loss = np.mean(val_losses)
-        
-        print(f"Epoch [{epoch+1}/{num_epochs}]  Train Loss: {avg_train_loss:.4f}  Val Loss: {avg_val_loss:.4f}")
-        
-        # Early stopping check
-        early_stopper(avg_val_loss)
-        if early_stopper.early_stop:
-            print("Early stopping triggered!")
-            break
-        
-        
-def evaluate_binary_classifier(model, data_loader, device):
-    """
-    Evaluate the binary classifier model on a given DataLoader.
-    Returns average loss and accuracy.
-    """
-    criterion = nn.BCEWithLogitsLoss()
-    model.eval().to(device)
-
-    total_loss = 0.0
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for products_batch, label_batch in data_loader:
-            products_list = list(products_batch)
-            labels = label_batch.to(device).view(-1, 1)
-            logits = model(products_list)  # (B,1)
-            loss = criterion(logits, labels.to(device).view(-1, 1))
-            total_loss += loss.item()
-            # Compute accuracy
-            preds = torch.sigmoid(logits)
-            predicted = (preds >= 0.5).float()
-            correct += (predicted == labels).sum().item()
-            total += labels.size(0)
-    
-    avg_loss = total_loss / len(data_loader)
-    accuracy = correct / total if total > 0 else 0
-    return avg_loss, accuracy
-
-def train_multilabel_classifier(
-    model, train_loader, val_loader,
-    device, lr, num_epochs, patience
-):
-    """
-    Trains the ProductMultiLabelPredictor model on training data
-    """
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    model.to(device)
-    early_stopper = EarlyStopping(patience=patience)
-
-    for epoch in range(num_epochs):
-        model.train()
-        train_losses = []
-        for products_batch, label_batch in train_loader:
-            # products: list of product lists
-            products_list = list(products_batch) 
-            labels = label_batch.to(device)  # shape: (batch_size, num_candidates)
-            optimizer.zero_grad()
-            logits = model(products_list)  # (B, num_candidates)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
-            train_losses.append(loss.item())
-        # Average training loss  
-        avg_train_loss = np.mean(train_losses)
-
-        # Validation
-        model.eval()
-        val_losses = []
-        with torch.no_grad():
-            for products_batch, label_batch in val_loader:
-                products_list = list(products_batch)
-                labels = label_batch.to(device)
-                logits = model(products_list)
-                val_losses.append(criterion(logits, labels).item())
-        avg_val_loss = np.mean(val_losses)
-
-
-        print(f"Epoch [{epoch+1}/{num_epochs}]  Train Loss: {avg_train_loss:.4f}  Val Loss: {avg_val_loss:.4f}")
-
-        # Early stopping
-        early_stopper(avg_val_loss)
-        if early_stopper.early_stop:
-            print("Early stopping triggered!")
-            break
-        
-def evaluate_multilabel_classifier(model, data_loader, device, threshold=0.5):
-    """
-    Evaluate the multi-label predictor model on a given DataLoader.
-    Returns average loss and an example measure of "average precision at threshold."
-    """
-    criterion = nn.BCEWithLogitsLoss()
-    model.eval()
-    model.to(device)
-
-    total_loss = 0.0
-    all_labels = []
-    all_preds = []
-
-    with torch.no_grad():
-        for products_batch, label_batch in data_loader:
-            products_list = list(products_batch)
-            labels = label_batch.to(device)          
             
-            logits = model(products_list)            
-            loss = criterion(logits, labels)
-            total_loss += loss.item()
+            train_metrics.update(loss.item(), outputs, will_buy)
+        
+        # Validation phase
+        model.eval()
+        val_metrics = MetricsTracker(task_type)
+        
+        with torch.no_grad():
+            for batch in valid_loader:
+                # Check if batch has 2 or 3 elements
+                if len(batch) == 2:
+                    products, labels = batch
+                    will_buy = None
+                else:
+                    products, will_buy, labels = batch
+                
+                will_buy = will_buy.to(device).float().view(-1, 1)
+                
+                inputs = torch.randn(len(products), Config.EMBEDDING_DIM).to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, will_buy)
+                val_metrics.update(loss.item(), outputs, will_buy)
+        
+        # Update history
+        train_metrics_dict = train_metrics.get_metrics()
+        val_metrics_dict = val_metrics.get_metrics()
+        
+        for metric in train_metrics_dict:
+            history['train'][metric].append(train_metrics_dict[metric])
+            history['val'][metric].append(val_metrics_dict[metric])
+        
+        # Print epoch summary
+        print(f'Epoch {epoch+1}/{epochs}')
+        print(f'Train Loss: {train_metrics_dict["loss"]:.4f} | '
+              f'Acc: {train_metrics_dict["accuracy"]:.4f} | '
+              f'Prec: {train_metrics_dict.get("precision", 0):.4f} | '
+              f'Rec: {train_metrics_dict.get("recall", 0):.4f} | '
+              f'F1: {train_metrics_dict.get("f1", 0):.4f}')
+        print(f'Val Loss: {val_metrics_dict["loss"]:.4f} | '
+              f'Acc: {val_metrics_dict["accuracy"]:.4f} | '
+              f'Prec: {val_metrics_dict.get("precision", 0):.4f} | '
+              f'Rec: {val_metrics_dict.get("recall", 0):.4f} | '
+              f'F1: {val_metrics_dict.get("f1", 0):.4f}')
+        print('-' * 80)
+    
+    return history
 
-            preds = torch.sigmoid(logits)
-            all_labels.append(labels.cpu())
-            all_preds.append(preds.cpu())
 
-    avg_loss = total_loss / len(data_loader)
-    all_labels = torch.cat(all_labels, dim=0)
-    all_preds = torch.cat(all_preds, dim=0)
-
-    # For a simple metric, compute multi-label accuracy or exact match ratio at threshold, or F1, etc.
-    # Here we'll do a simple example: average "precision" at threshold (not strictly MAP).
-    preds_binary = (all_preds >= threshold).float()
-    # True positives / predicted positives across entire dataset
-    tp = (preds_binary * all_labels).sum().item()
-    pred_positives = preds_binary.sum().item()
-    precision = tp / pred_positives if pred_positives > 0 else 0.0
-
-    return avg_loss, precision
+def main():
+    # Load data
+    train_df, valid_df, test_df = load_data(
+        Config.DATA_DIR, Config.TRAIN_FILE, Config.VALID_FILE, Config.TEST_FILE
+    )
+    
+    # Get product catalog
+    product_catalog = get_product_catalog([train_df, valid_df, test_df])
+    
+    # Create data loaders
+    train_loader, valid_loader, test_loader, product_to_idx = create_data_loaders(
+        train_df, valid_df, test_df, product_catalog, Config.BATCH_SIZE
+    )
+    
+    # Initialize models
+    embedder = ProductEmbedder()
+    encoder = PurchaseSequenceEncoder(embedder)
+    will_buy_model = WillBuyClassifier().to(Config.DEVICE)
+    recommender_model = ProductRecommender(Config.EMBEDDING_DIM, len(product_catalog)).to(Config.DEVICE)
+    
+    # Train will-buy classifier
+    print("Training Will-Buy Classifier...")
+    will_buy_criterion = torch.nn.BCELoss()
+    will_buy_optimizer = optim.Adam(will_buy_model.parameters(), lr=Config.LEARNING_RATE)
+    
+    will_buy_history = train_model(
+        will_buy_model,
+        train_loader,
+        valid_loader,
+        will_buy_criterion,
+        will_buy_optimizer,
+        Config.DEVICE,
+        Config.WILL_BUY_EPOCHS,
+        'binary'
+    )
+    plot_training_history(will_buy_history, "Will-Buy Classifier")
+    
+    # Train product recommender
+    print("\nTraining Product Recommender...")
+    recommender_criterion = torch.nn.BCELoss()
+    recommender_optimizer = optim.Adam(recommender_model.parameters(), lr=Config.LEARNING_RATE)
+    
+    recommender_history = train_model(
+        recommender_model,
+        train_loader,
+        valid_loader,
+        recommender_criterion,
+        recommender_optimizer,
+        Config.DEVICE,
+        Config.RECOMMENDER_EPOCHS,
+        'multilabel'
+    )
+    plot_training_history(recommender_history, "Product Recommender")
+    
+    # Evaluate on test set
+    # (Implementation would be similar to validation)
+    
+    # Save models
+    torch.save(will_buy_model.state_dict(), 'will_buy_model.pth')
+    torch.save(recommender_model.state_dict(), 'recommender_model.pth')
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--device",     type=str,
-                        default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--epochs",     type=int, default=20)
-    parser.add_argument("--lr",         type=float, default=1e-4)
-    parser.add_argument("--patience",   type=int, default=3)
-    args = parser.parse_args()
-
-    device = torch.device(args.device)
-    print(f">>> Using device: {device}")
-
-logger = get_logger()  # Optionally, you can specify log_dir and log_name
-logger.info("Starting the training process...")
-
-df_train = pd.read_csv('/scratch/umni5/a/shives/Course_Projects/CS_587_DL/Project/10perc_h&m/train.csv')
-df_valid = pd.read_csv('/scratch/umni5/a/shives/Course_Projects/CS_587_DL/Project/10perc_h&m/valid.csv')
-df_test = pd.read_csv('/scratch/umni5/a/shives/Course_Projects/CS_587_DL/Project/10perc_h&m/test.csv')
-
-df_train = df_train.sample(frac=0.1, random_state=42)
-df_valid = df_valid.sample(frac=0.1, random_state=42)
-df_test = df_test.sample(frac=0.1, random_state=42)
-
-
-df_train_bin = df_train[['products_before', 'order_after']]
-df_val_bin = df_valid[['products_before', 'order_after']]
-df_test_bin = df_test[['products_before', 'order_after']]
-
-df_train_multi = df_train[['products_before', 'post_cutoff']]
-df_val_multi = df_valid[['products_before', 'post_cutoff']]
-df_test_multi = df_test[['products_before', 'post_cutoff']]
-
-all_products = (
-    df_train['products_before'].explode().tolist() +
-    df_train['post_cutoff'].explode().tolist() +
-    df_valid['products_before'].explode().tolist() +
-    df_valid['post_cutoff'].explode().tolist() +
-    df_test['products_before'].explode().tolist() +
-    df_test['post_cutoff'].explode().tolist()
-)
-
-candidate_products = list(set([item.strip() for sublist in all_products for item in eval(sublist) if sublist]))
-
-#Prepare DataLoaders for Binary
-
-train_dataset_bin = PurchaseBinaryDataset(df_train_bin)
-val_dataset_bin   = PurchaseBinaryDataset(df_val_bin)
-test_dataset_bin  = PurchaseBinaryDataset(df_test_bin)
-
-train_loader_bin = DataLoader(train_dataset_bin, batch_size=args.batch_size, shuffle=True,pin_memory=True,num_workers=4)
-val_loader_bin   = DataLoader(val_dataset_bin, batch_size=args.batch_size, shuffle=False,pin_memory=True,num_workers=2)
-test_loader_bin  = DataLoader(test_dataset_bin, batch_size=args.batch_size, shuffle=False,pin_memory=True,num_workers=4)
-
-
-# Train/Eval the Binary Classifier
-
-
-binary_model = PurchaseBinaryClassifier(pretrained_model_name='t5-small', device=device).to(device)
-train_binary_classifier(
-    model=binary_model,
-    train_loader=train_loader_bin,
-    val_loader=val_loader_bin,
-    device=device,
-    lr=args.lr,
-    num_epochs=args.epochs,
-    patience=args.patience
-)
-test_loss_bin, test_acc_bin = evaluate_binary_classifier(binary_model, test_loader_bin, device=device)
-print(f"\n[Binary] Test Loss: {test_loss_bin:.4f}, Test Accuracy: {test_acc_bin:.4f}")
-
-
-
-# Prepare DataLoaders for Multi-Label
-
-train_dataset_multi = PurchaseMultiLabelDataset(df_train_multi, candidate_products)
-val_dataset_multi   = PurchaseMultiLabelDataset(df_val_multi, candidate_products)
-test_dataset_multi  = PurchaseMultiLabelDataset(df_test_multi, candidate_products)
-
-train_loader_multi = DataLoader(train_dataset_multi, batch_size=args.batch_size, shuffle=True)
-val_loader_multi   = DataLoader(val_dataset_multi, batch_size=args.batch_size, shuffle=False)
-test_loader_multi  = DataLoader(test_dataset_multi, batch_size=args.batch_size, shuffle=False)
-
-
-#Train/Eval the Multi-Label Classifier
-
-multi_model = ProductMultiLabelPredictor(candidate_products, pretrained_model_name='t5-small', device=device).to(device)
-train_multilabel_classifier(
-    model=multi_model,
-    train_loader=train_loader_multi,
-    val_loader=val_loader_multi,
-    device=device,
-    lr=args.lr,
-    num_epochs=args.epochs,
-    patience=args.patience
-)
-test_loss_multi, test_precision_multi = evaluate_multilabel_classifier(multi_model, test_loader_multi, device=device)
-print(f"\n[Multi-Label] Test Loss: {test_loss_multi:.4f}, Test Precision: {test_precision_multi:.4f}\n")
+    main()
