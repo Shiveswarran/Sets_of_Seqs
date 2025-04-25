@@ -66,16 +66,17 @@ def train_model(
                 will_buy = None
             else:
                 products, will_buy, labels = batch
-            
-            will_buy = will_buy.to(device).float().view(-1, 1)
+
+            will_buy = will_buy.to(device).float().view(-1, 1)  # Reshape will_buy to [batch_size, 1]
             
             # Convert products to embeddings
-            # (This would be replaced with actual encoding)
             inputs = torch.randn(len(products), Config.EMBEDDING_DIM).to(device)
             
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, will_buy)
+            outputs = model(inputs)  # Model output will be of shape [batch_size, 1]
+            
+            # Loss calculation for binary classification
+            loss = criterion(outputs, will_buy)  # Ensure shapes match for BCEWithLogitsLoss
             loss.backward()
             optimizer.step()
             
@@ -87,14 +88,13 @@ def train_model(
         
         with torch.no_grad():
             for batch in valid_loader:
-                # Check if batch has 2 or 3 elements
                 if len(batch) == 2:
                     products, labels = batch
                     will_buy = None
                 else:
                     products, will_buy, labels = batch
                 
-                will_buy = will_buy.to(device).float().view(-1, 1)
+                will_buy = will_buy.to(device).float().view(-1, 1)  # Reshape will_buy to [batch_size, 1]
                 
                 inputs = torch.randn(len(products), Config.EMBEDDING_DIM).to(device)
                 outputs = model(inputs)
@@ -124,6 +124,7 @@ def train_model(
         print('-' * 80)
     
     return history
+
 
 
 def main():

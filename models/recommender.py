@@ -4,7 +4,6 @@ from config import Config
 class ProductRecommender(nn.Module):
     def __init__(self, input_dim: int, num_products: int):
         super(ProductRecommender, self).__init__()
-        from config import Config
         self.layers = nn.Sequential(
             nn.Linear(input_dim, Config.HIDDEN_DIM * 2),
             nn.ReLU(),
@@ -12,8 +11,8 @@ class ProductRecommender(nn.Module):
             nn.Linear(Config.HIDDEN_DIM * 2, Config.HIDDEN_DIM),
             nn.ReLU(),
             nn.Dropout(Config.DROPOUT),
-            nn.Linear(Config.HIDDEN_DIM, num_products),
-            nn.Sigmoid()
+            nn.Linear(Config.HIDDEN_DIM, num_products),  # Output size should match num_products
+            nn.Sigmoid()  # Use Sigmoid for multi-label classification
         )
         
     def forward(self, x):
