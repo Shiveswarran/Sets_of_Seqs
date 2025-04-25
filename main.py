@@ -11,39 +11,78 @@ df_valid = pd.read_csv('/scratch/umni5/a/shives/Course_Projects/CS_587_DL/Sets_o
 df_test = pd.read_csv('/scratch/umni5/a/shives/Course_Projects/CS_587_DL/Sets_of_Seqs/data/test.csv')
 
 
-#Binary Classifier
-
-#Data Preprocessing
-df_train = df_train[['products_before','order_after']]
-df_valid = df_valid[['products_before','order_after']]
-df_test = df_test[['products_before','order_after']]
-
 #Converts the string representation of list to actual list
 def product_splitting(s):
     items = ast.literal_eval(s)
     return [str(item).strip() for item in items]
 
-df_train['products_before'] = df_train['products_before'].apply(product_splitting)
-df_valid['products_before'] = df_valid['products_before'].apply(product_splitting)
-df_test['products_before'] = df_test['products_before'].apply(product_splitting)
+for df in (df_train, df_valid, df_test):
+    df['products_before'] = df['products_before'].apply(product_splitting)
+    df['post_cutoff'] = df['post_cutoff'].apply(product_splitting)
 
 
-#Encoding the products
+#ENCODING PRODUCTS
 #Using Sentence Transformers to encode the products
 
-def encode_products(product_list,encoder_model=SentenceTransformer('all-MiniLM-L6-v2', device='cuda')):
-    embeddings = encoder_model.encode(
-        product_list,
-        convert_to_numpy=True,    # get numpy array
-        batch_size=32,            
-    )
-    return [embeddings[i] for i in range(embeddings.shape[0])]
+#Build the set of all unique products
+all_products = set()
+for df in (df_train, df_valid, df_test):
+    all_products.update(df['products_before'].explode().unique())
 
-df_train['products_before'] = df_train['products_before'].apply(encode_products)
-df_valid['products_before'] = df_valid['products_before'].apply(encode_products)
-df_test['products_before'] = df_test['products_before'].apply(encode_products)
+model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
+product_list = list(all_products)
+embeddings = model.encode(
+    product_list,
+    convert_to_numpy=True,
+    batch_size=64
+)
+product_embedding_dict = dict(zip(product_list, embeddings))
+
+#Lookup function that just pulls from the dict
+def encode_products_from_dict(product_list, embedding_dict=product_embedding_dict):
+    # stack into a (len(product_list), D) array
+    return np.vstack([embedding_dict[prod] for prod in product_list])
+
+#Apply lookup to each row
+for df in (df_train, df_valid, df_test):
+    df['products_before_embeddings'] = df['products_before'].apply(encode_products_from_dict)
+    df['post_cutoff_embeddings'] = df['post_cutoff'].apply(encode_products_from_dict)
+
+# now df['{products_before, post_cutoff}_embeddings'] is an array of shape (N_items, embed_dim) per row,
 
 
 
-#OR OUTPUT ONLY EMBEDDING ARRAY
+#Janossy Pooling
 
+
+
+
+
+#DeepSet
+
+
+
+
+
+
+
+#Set Transformer
+
+
+
+
+
+
+
+
+
+
+
+
+#BINARY CLASSIFIER *** WILL THE USER BUY OR NOT IN NEXT WEEK ***
+
+
+
+
+
+#MULTILABEL CLASSIFIER *** WHAT WILL THE USER BUY NEXT WEEK ***
