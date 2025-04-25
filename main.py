@@ -39,15 +39,6 @@ def encode_products(product_list,encoder_model=SentenceTransformer('all-MiniLM-L
     )
     return [embeddings[i] for i in range(embeddings.shape[0])]
 
-encoder_model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
-
-def encode_products(product_list):
-    embeddings_list = []
-    for product in product_list:
-        embeddings = encoder_model.encode(product, convert_to_numpy=True)
-        embeddings_list.append(embeddings)
-    return embeddings_list
-
 df_train['products_before'] = df_train['products_before'].apply(encode_products)
 df_valid['products_before'] = df_valid['products_before'].apply(encode_products)
 df_test['products_before'] = df_test['products_before'].apply(encode_products)
